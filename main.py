@@ -1,4 +1,4 @@
-            import streamlit as st
+import streamlit as st
 import yfinance as yf
 import pandas as pd
 import time
@@ -17,64 +17,52 @@ def send_telegram_msg(message):
 st.set_page_config(page_title="Zerodha Live Tracker", layout="wide")
 st.title("🏹 Zerodha Portfolio Sentinel")
 
-# --- NEW: TELEGRAM TEST BUTTON ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("🔧 System Check")
     if st.button("🛠️ Test Telegram Connection"):
-        try:
-            token = st.secrets["TELEGRAM_TOKEN"]
-            chat_id = st.secrets["TELEGRAM_CHAT_ID"]
-            test_url = f"https://api.telegram.org/bot{token}/sendMessage?chat_id={chat_id}&text=✅ App connected successfully to your Portfolio!"
-            
-            response = requests.get(test_url)
-            if response.status_code == 200:
-                st.success("Test message sent! Check Telegram.")
-            else:
-                st.error(f"Error {response.status_code}: {response.text}")
-        except Exception as e:
-            st.error(f"Secrets Error: {e}")
+        token = st.secrets["TELEGRAM_TOKEN"]
+        chat_id = st.secrets["TELEGRAM_CHAT_ID"]
+        test_url = f"https://api.telegram.org/bot{token}/sendMessage?chat_id={chat_id}&text=✅ Connection Successful!"
+        res = requests.get(test_url)
+        if res.status_code == 200: st.success("Message sent!")
+        else: st.error("Check Token/ID")
 
     st.divider()
     st.header("Alert Settings")
     loss_limit = st.number_input("Loss Threshold %", value=15.0)
     profit_limit = st.number_input("Profit Threshold %", value=115.0)
 
-# --- FILE UPLOAD LOGIC ---
+# --- FILE UPLOAD ---
 uploaded_file = st.file_uploader("Upload Zerodha P&L (Equity.csv)", type=['csv', 'xlsx'])
 
+# Safety Gate: Only run if a file exists
 if uploaded_file:
-    # 1. READ FILE (Handling Zerodha's top empty rows)
-    if uploaded_file.name.endswith('.csv'):
-        df_raw = pd.read_csv(uploaded_file, header=None)
-    else:
-        df_raw = pd.read_excel(uploaded_file, header=None)
-
-    # Find the header row (where 'Symbol' exists)
-    header_row_index = 0
-    for i, row in df_raw.iterrows():
-        if "Symbol" in row.values:
-            header_row_index = i
-            break
-    
-    # Re-read with correct header
-    uploaded_file.seek(0)
-    if uploaded_file.name.endswith('.csv'):
-        df = pd.read_csv(uploaded_file, skiprows=header_row_index)
-    else:
-        df = pd.read_excel(uploaded_file, skiprows=header_row_index)
-
-    # Filter out empty rows or total rows
-    df = df[df['Symbol'].notna()]
-    df = df[df['Symbol'] != 'Symbol'] 
-
-    st.write(f"✅ Found {len(df)} stocks in your Zerodha file.")
-
-    if st.button("🚀 START LIVE MONITORING"):
-        st.session_state.monitoring = True
+    if 'portfolio_data' not in st.session_state:
+        # Detect Zerodha header row
+        df_raw = pd.read_csv(uploaded_file, header=None) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file, header=None)
+        
+        header_row = 0
+        for i, row in df_raw.iterrows():
+            if "Symbol" in row.values:
+                header_row = i
+                break
+        
+        uploaded_file.seek(0)
+        df = pd.read_csv(uploaded_file, skiprows=header_row) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file, skiprows=header_row)
+        
+        # Clean Data
+        df = df[df['Symbol'].notna()]
+        df = df[df['Open Quantity'] > 0] # Only track what you currently hold
         st.session_state.portfolio_data = df
 
-# --- MONITORING ENGINE ---
-if st.session_state.get('monitoring'):
+    st.write(f"✅ Ready to track {len(st.session_state.portfolio_data)} stocks.")
+    
+    if st.button("🚀 START MONITORING"):
+        st.session_state.monitoring = True
+
+# --- MONITORING ENGINE (Only runs if button was clicked) ---
+if st.session_state.get('monitoring') and 'portfolio_data' in st.session_state:
     monitor_area = st.empty()
     if 'sent_alerts' not in st.session_state:
         st.session_state.sent_alerts = set()
@@ -83,40 +71,37 @@ if st.session_state.get('monitoring'):
         results = []
         for _, row in st.session_state.portfolio_data.iterrows():
             raw_ticker = str(row['Symbol']).strip().upper()
-            ticker = f"{raw_ticker}.NS" # Add NSE suffix for Yahoo Finance
+            if raw_ticker == "SYMBOL": continue
+            
+            ticker = f"{raw_ticker}.NS"
             
             try:
-                # Zerodha Buy Price Logic:
-                # Typically 'Buy Value' / 'Open Quantity'
-                buy_val = float(row['Buy Value'])
+                # Zerodha Column Math
+                total_invested = float(row['Open Value'])
                 qty = float(row['Open Quantity'])
-                buy_price = buy_val / qty if qty > 0 else 0
+                buy_price = total_invested / qty
                 
-                # Get Live Price
+                # Fetch Price
                 stock = yf.Ticker(ticker)
-                # Using history for better reliability
-                current_price = stock.history(period='1d')['Close'].iloc[-1]
-                
-                change = ((current_price - buy_price) / buy_price) * 100
+                curr_price = stock.history(period='1d')['Close'].iloc[-1]
+                change = ((curr_price - buy_price) / buy_price) * 100
 
-                # Check Alerts
+                # Alerts
                 if (change <= -loss_limit or change >= profit_limit) and raw_ticker not in st.session_state.sent_alerts:
-                    alert_msg = f"🔔 *STOCK ALERT* 🔔\n\n*Stock:* {raw_ticker}\n*Move:* {change:.2f}%\n*Price:* ₹{current_price:.2f}"
-                    send_telegram_msg(alert_msg)
+                    send_telegram_msg(f"🔔 *STOCK ALERT*\n{raw_ticker}: {change:.2f}% (₹{curr_price:.2f})")
                     st.session_state.sent_alerts.add(raw_ticker)
 
-                results.append({
-                    "Stock": raw_ticker,
-                    "Avg Buy": round(buy_price, 2),
-                    "Live Price": round(current_price, 2),
-                    "Gain/Loss %": f"{change:.2f}%"
-                })
+                results.append({"Stock": raw_ticker, "Buy": round(buy_price, 2), "Live": round(curr_price, 2), "Change": f"{change:.2f}%"})
             except:
                 continue
 
         with monitor_area.container():
             st.table(pd.DataFrame(results))
-            st.caption(f"Refreshing every 60s... Last update: {time.strftime('%H:%M:%S')}")
+            st.caption(f"Last update: {time.strftime('%H:%M:%S')}")
         
         time.sleep(60)
         st.rerun()
+else:
+    if not uploaded_file:
+        st.info("👋 Welcome! Please upload your Zerodha Equity CSV to begin.")
+                
