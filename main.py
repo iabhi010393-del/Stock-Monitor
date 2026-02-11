@@ -17,6 +17,16 @@ def send_telegram_msg(message):
 # --- APP UI ---
 st.set_page_config(page_title="Global Portfolio Monitor", page_icon="📈")
 st.title("📈 Global Portfolio Monitor")
+if st.button("🛠️ Test Telegram Connection"):
+    token = st.secrets["TELEGRAM_TOKEN"]
+    chat_id = st.secrets["TELEGRAM_CHAT_ID"]
+    test_url = f"https://api.telegram.org/bot{token}/sendMessage?chat_id={chat_id}&text=App connected successfully!"
+    
+    response = requests.get(test_url)
+    if response.status_code == 200:
+        st.success("Test message sent! Check Telegram.")
+    else:
+        st.error(f"Error {response.status_code}: {response.text}")
 st.write("Upload your Excel, set your targets, and get Telegram alerts.")
 
 # Sidebar for Settings
